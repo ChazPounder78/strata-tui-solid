@@ -9,6 +9,7 @@ type Message = {
   role: "user" | "assistant"
   text: string
   time: number
+  reasoning?: string
 }
 
 const App = () => {
@@ -17,16 +18,25 @@ const App = () => {
   const [model, setModel] = createSignal("local")
   const [streaming, setStreaming] = createSignal(false)
   const [status, setStatus] = createSignal("ready")
+  const [ctx, setCtx] = createSignal(0)
+  const [maxCtx, setMaxCtx] = createSignal(131072)
 
   onMount(async () => {
     try {
       const h = await fetch(`${API_BASE}/health`).then(r => r.json()).catch(() => null)
       if (h?.model) setModel(h.model)
+      if (h?.max_context) setMaxCtx(h.max_context)
     } catch {}
     try {
       const t = await fetch(SYNC_URL).then(r => r.json())
       setMessages((t.messages || []) as Message[])
     } catch {}
+    setInterval(async () => {
+      try {
+        const h = await fetch(`${API_BASE}/health`, { cache: "no-store" }).then(r => r.json())
+        if (h?.max_context) setMaxCtx(h.max_context)
+      } catch {}
+    }, 15000)
   })
 
   const send = async () => {
@@ -80,6 +90,18 @@ const App = () => {
                 return prev
               })
             }
+            if (delta?.reasoning_content) {
+              setMessages((prev) => {
+                const last = prev[prev.length - 1]
+                if (last?.role === "assistant") {
+                  return [...prev.slice(0, -1), { ...last, reasoning: (last.reasoning || "") + delta.reasoning_content }]
+                }
+                return prev
+              })
+            }
+            if (j.usage?.prompt_tokens) {
+              setCtx(j.usage.prompt_tokens + (j.usage.completion_tokens || 0))
+            }
           } catch {}
         }
       }
@@ -108,28 +130,37 @@ const App = () => {
     }
   })
 
+  const pct = maxCtx() > 0 ? Math.round((ctx() / maxCtx()) * 100) : 0
+  const pctStr = pct > 100 ? "100%" : pct + "%"
+
   return (
-    <box flexDirection="column" width="100%" height="100%">
-      <box height={1} paddingX={1} border="single" borderColor="cyan">
-        <text>STRATA · {model()} · {streaming() ? "generating" : status()}</text>
+    <box flexDirection="row" width="100%" height="100%">
+      <box flexDirection="column" flexGrow={1} height="100%">
+        <box height={1} paddingX={1} border="single" borderColor="cyan">
+          <text>Strata · {model()}</text>
+        </box>
+        <scrollbox flexGrow={1} paddingX={1}>
+          <For each={messages()}>
+            {(m) => (
+              <box flexDirection="column" marginBottom={1}>
+                <text color={m.role === "user" ? "green" : "cyan"}>{m.role === "user" ? "You:" : "Assistant:"}</text>
+                {m.reasoning && <text color="gray">{m.reasoning}</text>}
+                <text>{m.text}</text>
+              </box>
+            )}
+          </For>
+        </scrollbox>
+        <box height={3} paddingX={1} border="single" borderColor="blue">
+          <textarea value={input()} onInput={(v) => setInput(String(v))} onSubmit={send} flexGrow={1} />
+        </box>
       </box>
-      <scrollbox flexGrow={1} paddingX={1}>
-        <For each={messages()}>
-          {(m) => (
-            <box flexDirection="column" marginBottom={1}>
-              <text color={m.role === "user" ? "green" : "cyan"}>{m.role === "user" ? "You:" : "AI:"}</text>
-              <text>{m.text}</text>
-            </box>
-          )}
-        </For>
-      </scrollbox>
-      <box height={3} paddingX={1} border="single" borderColor="blue">
-        <textarea
-          value={input()}
-          onInput={(v) => setInput(String(v))}
-          onSubmit={send}
-          flexGrow={1}
-        />
+      <box width={20} flexDirection="column" border="single" borderColor="gray">
+        <box height={1} paddingX={1}><text bold>Context</text></box>
+        <box flexDirection="column" paddingX={1}>
+          <text>{ctx().toLocaleString()} / {maxCtx().toLocaleString()}</text>
+          <text color={pct > 80 ? "yellow" : "gray"}>{pctStr}</text>
+          <text color="gray">{streaming() ? "generating" : status()}</text>
+        </box>
       </box>
     </box>
   )
