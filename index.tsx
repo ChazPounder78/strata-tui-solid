@@ -9,12 +9,6 @@ type Message = {
   role: "user" | "assistant"
   text: string
   time: number
-  reasoning?: string
-  meta?: string
-  error?: string
-  stopped?: boolean
-  images?: any[]
-  files?: any[]
 }
 
 const App = () => {
@@ -36,8 +30,8 @@ const App = () => {
   })
 
   const send = async () => {
-    const text = input().trim()
-    if (!text || streaming()) return
+    const text = input()
+    if (!text || text.trim() === "" || streaming()) return
     const userMsg: Message = { role: "user", text, time: Date.now() }
     const asstMsg: Message = { role: "assistant", text: "", time: Date.now() }
     const msgsBefore = messages()
@@ -72,27 +66,16 @@ const App = () => {
         for (const line of chunk.split("\n")) {
           const l = line.trim()
           if (!l.startsWith("data:")) continue
-          const data = l.slice(5).trim()
-          if (data === "[DONE]") continue
+          const d = l.slice(5).trim()
+          if (d === "[DONE]") continue
           try {
-            const j = JSON.parse(data)
+            const j = JSON.parse(d)
             const delta = j.choices?.[0]?.delta
             if (delta?.content) {
               setMessages((prev) => {
                 const last = prev[prev.length - 1]
                 if (last?.role === "assistant") {
-                  last.text += delta.content
-                  return [...prev.slice(0, -1), { ...last }]
-                }
-                return prev
-              })
-            }
-            if (delta?.reasoning_content) {
-              setMessages((prev) => {
-                const last = prev[prev.length - 1]
-                if (last?.role === "assistant") {
-                  last.reasoning = (last.reasoning || "") + delta.reasoning_content
-                  return [...prev.slice(0, -1), { ...last }]
+                  return [...prev.slice(0, -1), { ...last, text: last.text + delta.content }]
                 }
                 return prev
               })
@@ -110,57 +93,42 @@ const App = () => {
       setStatus("ready")
     } catch (e: any) {
       setStatus(e?.message || "error")
-      setMessages((prev) => {
-        const last = prev[prev.length - 1]
-        if (last?.role === "assistant") {
-          last.error = e?.message
-          return [...prev.slice(0, -1), { ...last }]
-        }
-        return prev
-      })
     } finally {
       setStreaming(false)
     }
   }
 
   useKeyboard((key) => {
-    if (key.name === "return" && key.eventType !== "release") {
+    if (key.eventType !== "press") return
+    if (key.name === "enter" && !key.shift && !key.ctrl && !key.alt && !key.meta) {
       send()
     }
-    if ((key.name === "c" && key.ctrl) || (key.name === "q" && key.ctrl)) {
+    if ((key.ctrl && key.name === "c") || (key.ctrl && key.name === "q")) {
       process.exit(0)
-    }
-    if (key.name === "escape") {
-      // could stop stream later
     }
   })
 
   return (
     <box flexDirection="column" width="100%" height="100%">
-      <box borderStyle="round" borderColor="cyan" padding={1} justifyContent="space-between">
-        <text>STRATA · {model()}</text>
-        <text color="gray">{streaming() ? "generating..." : status()}</text>
+      <box height={1} paddingX={1} border="single" borderColor="cyan">
+        <text>STRATA · {model()} · {streaming() ? "generating" : status()}</text>
       </box>
-      <scrollbox flexGrow={1} padding={1} flexDirection="column">
+      <scrollbox flexGrow={1} paddingX={1}>
         <For each={messages()}>
           {(m) => (
             <box flexDirection="column" marginBottom={1}>
-              <text color={m.role === "user" ? "green" : "cyan"} bold>
-                {m.role === "user" ? "You" : "AI"} · {new Date(m.time).toLocaleTimeString()}
-              </text>
-              {m.reasoning && <text color="gray">{m.reasoning}</text>}
+              <text color={m.role === "user" ? "green" : "cyan"}>{m.role === "user" ? "You:" : "AI:"}</text>
               <text>{m.text}</text>
-              {m.error && <text color="red">{m.error}</text>}
             </box>
           )}
         </For>
       </scrollbox>
-      <box padding={1} flexDirection="column">
+      <box height={3} paddingX={1} border="single" borderColor="blue">
         <textarea
           value={input()}
           onInput={(v) => setInput(String(v))}
-          height={3}
-          placeholder="type message... (Enter to send, Ctrl+C to quit)"
+          onSubmit={send}
+          flexGrow={1}
         />
       </box>
     </box>
