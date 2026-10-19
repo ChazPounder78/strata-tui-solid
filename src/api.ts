@@ -24,6 +24,14 @@ export type Health = {
   [k: string]: unknown;
 };
 
+export type Slots = Array<{
+  id: number;
+  n_ctx: number;
+  is_processing: boolean;
+  n_prompt_tokens: number;
+  [k: string]: unknown;
+}>;
+
 export type StreamEvent =
   | { type: "reasoning"; text: string }
   | { type: "content"; text: string }
@@ -38,6 +46,12 @@ export async function health(): Promise<Health> {
   const res = await fetch(`${API_BASE}/health`, { cache: "no-store" });
   if (!res.ok) throw new Error(`health ${res.status}`);
   return (await res.json()) as Health;
+}
+
+export async function slots(): Promise<Slots> {
+  const res = await fetch(`${API_BASE}/slots`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`slots ${res.status}`);
+  return (await res.json()) as Slots;
 }
 
 export async function loadTranscript(): Promise<Message[]> {

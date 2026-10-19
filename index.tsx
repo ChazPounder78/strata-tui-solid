@@ -8,14 +8,13 @@ import {
   readAttachment,
   readClipboard,
   saveTranscript,
+  slots,
   stream,
   type Attachment,
   type Message,
 } from "./src/api";
-import { API_BASE, DEFAULT_MODEL, DEFAULT_THINKING } from "./src/config";
+import { API_BASE, DEFAULT_MAX_CTX, DEFAULT_MODEL, DEFAULT_THINKING } from "./src/config";
 import { bar, fmtTokens, hhmm, theme } from "./src/theme";
-
-const APP_VERSION = "strata-tui-solid";
 
 const TEXTAREA_KEYS = [
   { name: "return", action: "submit" as const },
@@ -25,12 +24,6 @@ const TEXTAREA_KEYS = [
 ];
 
 const MAX_COMPOSER_ROWS = 12;
-
-function estimateTokens(messages: Message[]): number {
-  let chars = 0;
-  for (const m of messages) chars += (m.text?.length ?? 0) + (m.reasoning?.length ?? 0);
-  return Math.ceil(chars / 4);
-}
 
 /** Rough count of wrapped rows a textarea buffer occupies at the given width. */
 function visualRows(text: string, width: number): number {
@@ -110,7 +103,7 @@ function App() {
   const [streaming, setStreaming] = createSignal(false);
   const [status, setStatus] = createSignal("ready");
   const [ctxUsed, setCtxUsed] = createSignal(0);
-  const [maxCtx, setMaxCtx] = createSignal(131072);
+  const [maxCtx, setMaxCtx] = createSignal(DEFAULT_MAX_CTX);
   const [attachments, setAttachments] = createSignal<{ kind: "image" | "file"; att: Attachment }[]>([]);
   const [tokens, setTokens] = createSignal({ prompt: 0, completion: 0, rate: 0 });
   const [input, setInput] = createSignal("");
@@ -120,26 +113,30 @@ function App() {
   let healthTimer: ReturnType<typeof setInterval> | null = null;
   let composerPoll: ReturnType<typeof setInterval> | null = null;
 
-  onMount(async () => {
+  const refreshStats = async () => {
     try {
       const h = await health();
       if (h.model) setModel(h.model);
       if (h.max_context) setMaxCtx(h.max_context);
-    } catch {
-      setStatus(`engine offline at ${API_BASE}`);
-    }
+    } catch {}
+    try {
+      const s = await slots();
+      const slot = s[0];
+      if (slot) {
+        if (slot.n_ctx) setMaxCtx(slot.n_ctx);
+        setCtxUsed(slot.n_prompt_tokens ?? 0);
+      }
+    } catch {}
+  };
+
+  onMount(async () => {
     try {
       setMessages(await loadTranscript());
     } catch {
       setStatus("transcript sync unavailable");
     }
-    healthTimer = setInterval(async () => {
-      try {
-        const h = await health();
-        if (h.model) setModel(h.model);
-        if (h.max_context) setMaxCtx(h.max_context);
-      } catch {}
-    }, 15000);
+    await refreshStats();
+    healthTimer = setInterval(refreshStats, 3000);
     composerPoll = setInterval(() => {
       try {
         if (composer) {
@@ -196,7 +193,6 @@ function App() {
           const prompt = Number(ev.usage.prompt_tokens ?? 0);
           const completion = Number(ev.usage.completion_tokens ?? 0);
           const secs = (performance.now() - started) / 1000;
-          setCtxUsed(prompt + completion);
           setTokens({ prompt, completion, rate: completion > 0 && secs > 0.25 ? completion / secs : 0 });
           setMessages((prev) =>
             patchLast(prev, (m) => ({
@@ -223,12 +219,14 @@ function App() {
       setStreaming(false);
       abort.ctrl = undefined;
       const final = messages();
-      setCtxUsed((c) => (c > 0 ? c : estimateTokens(final)));
       try {
         await saveTranscript(final);
       } catch {
         setStatus("save failed");
       }
+      // Server /slots is the source of truth for context fill — refresh promptly
+      // so the bar reflects the just-appended turn instead of waiting for the poll.
+      refreshStats();
     }
   };
 
@@ -425,25 +423,14 @@ function App() {
           <box
             height={1}
             flexDirection="row"
-            justifyContent="space-between"
+            alignItems="center"
             paddingLeft={1}
             paddingRight={1}
           >
-            <box flexDirection="row">
-              <text fg={theme.user}>Enter</text>
-              <text fg={theme.dim}> send · </text>
-              <text fg={theme.user}>Shift+Enter</text>
-              <text fg={theme.dim}> nl · </text>
-              <text fg={theme.user}>Esc</text>
-              <text fg={theme.dim}> stop · </text>
-              <text fg={theme.user}>Ctrl+T</text>
-              <text fg={theme.dim}> thinking · </text>
-              <text fg={theme.user}>Ctrl+Q</text>
-              <text fg={theme.dim}> quit</text>
-            </box>
-            <Show when={!wide()} fallback={<text fg={theme.dim}>{APP_VERSION}</text>}>
-              <text fg={ctxColor()}>ctx {ctxPct().toFixed(0)}%</text>
-            </Show>
+            <text fg={ctxColor()}>
+              {bar(ctxPct(), Math.max(8, contentWidth() - 5))}
+              {`  ${ctxPct().toFixed(0)}%`}
+            </text>
           </box>
         </box>
       </box>
@@ -561,11 +548,10 @@ function Sidebar(props: {
         </text>
       </box>
       <box flexDirection="column" paddingLeft={1} paddingRight={1}>
-        <text fg={props.ctxColor}>{bar(props.ctxPct, 24)}</text>
+        <text fg={props.ctxColor}>{props.ctxPct.toFixed(1)}% used</text>
         <text fg={theme.dim}>
           {fmtTokens(props.ctxUsed)} / {fmtTokens(props.maxCtx)} tokens
         </text>
-        <text fg={props.ctxColor}>{props.ctxPct.toFixed(0)}% used</text>
       </box>
 
       <box paddingLeft={1} paddingTop={1}>
