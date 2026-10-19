@@ -14,10 +14,8 @@ export const theme = {
   error: "#f7768e",
   reasoning: "#7a7f95",
   code: "#1a1f2b",
-  // Muted memory-segment palette (no screaming colors)
-  memStrata: "#6c7a9c", // what Strata/model actively uses — desaturated indigo
-  memCached: "#5a7d7c", // reclaimable cache — desaturated teal
-  memFree: "#333b4d", // untouched free — dark slate
+  chatBg: "#0f131a", // subtle panel behind the chat text
+  assistantBg: "#161b26", // slightly lifted card behind model output
 };
 
 /** A single colored run of a stacked bar. */

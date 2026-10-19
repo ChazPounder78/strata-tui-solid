@@ -17,7 +17,7 @@ import {
   type Message,
 } from "./src/api";
 import { API_BASE, DEFAULT_MAX_CTX, DEFAULT_MODEL, DEFAULT_THINKING } from "./src/config";
-import { bar, fillFor, fmtBytes, fmtTokens, hhmm, stackBar, theme, type Seg } from "./src/theme";
+import { fillFor, fmtBytes, fmtTokens, hhmm, theme } from "./src/theme";
 import { applyOmarchyTheme } from "./src/omarchy";
 
 const TEXTAREA_KEYS = [
@@ -28,6 +28,8 @@ const TEXTAREA_KEYS = [
 ];
 
 const MAX_COMPOSER_ROWS = 12;
+
+const KEY_HINTS = ["Enter · send", "Shift+Enter · newline", "Esc · stop", "Ctrl+T · thinking", "Ctrl+Q · quit"];
 
 /** Rough count of wrapped rows a textarea buffer occupies at the given width. */
 function visualRows(text: string, width: number): number {
@@ -376,38 +378,14 @@ function App() {
   const ctxPct = () => (maxCtx() > 0 ? Math.min(100, (ctxUsed() / maxCtx()) * 100) : 0);
   const ctxColor = () => fillFor(ctxPct());
 
-  // VRAM split: what Strata/model uses vs free — colored like the context bar.
-  const vramSegs = () => {
-    const { vramUsed = 0, vramTotal = 0 } = hw();
-    if (!vramTotal) return null;
-    const usedPct = Math.max(0, Math.min(100, (vramUsed / vramTotal) * 100));
-    return [
-      { pct: usedPct, color: fillFor(usedPct) },
-      { pct: 100 - usedPct, color: theme.dim },
-    ];
-  };
-  // RAM split: Strata/active (total-available), reclaimable cache, free.
-  const ramSegs = () => {
-    const m = mem();
-    if (!m || !m.total) return null;
-    const cached = Math.min(m.cached, m.total - m.free);
-    const used = Math.max(0, m.total - m.available - cached);
-    const free = Math.max(0, m.free);
-    return [
-      { pct: used, color: fillFor(used) },
-      { pct: cached, color: theme.assistant },
-      { pct: free, color: theme.dim },
-    ];
-  };
-
   // The composer grows upward with typed content; the footer stays pinned below.
   const contentWidth = () => {
     const main = dims().width - (wide() ? 30 : 0);
     return Math.max(8, main - 4); // minus border + padding
   };
-  // Rows the footer occupies: vram(1) + ram(1) + context(1) + spacer(1) = 4,
-  // plus header(2), composer borders(2) and a minimum chat area(6).
-  const composerMaxRows = () => Math.max(1, dims().height - 14);
+  // Rows below the chat: header(2), composer borders(2), spacer(1), key
+  // hints(5) and a minimum chat area(6).
+  const composerMaxRows = () => Math.max(1, dims().height - 16);
   const composerRows = () =>
     Math.min(MAX_COMPOSER_ROWS, composerMaxRows(), visualRows(input(), contentWidth()));
   const composerHeight = () => composerRows() + 2; // + top/bottom border
@@ -442,6 +420,7 @@ function App() {
           minHeight={0}
           paddingLeft={1}
           paddingRight={1}
+          backgroundColor={theme.chatBg}
           stickyScroll
           stickyStart="bottom"
         >
@@ -499,25 +478,8 @@ function App() {
             />
           </box>
           <box height={1} backgroundColor={theme.panelAlt} />
-          <MemRow label="vram" segs={vramSegs()} used={hw().vramUsed} total={hw().vramTotal} width={contentWidth()} />
-          <MemRow
-            label="ram"
-            segs={ramSegs()}
-            used={mem() ? mem()!.total - mem()!.available : undefined}
-            total={mem()?.total}
-            width={contentWidth()}
-          />
-          <box
-            height={1}
-            flexDirection="row"
-            alignItems="center"
-            paddingLeft={1}
-            paddingRight={1}
-          >
-            <text fg={ctxColor()}>
-              {bar(ctxPct(), Math.max(8, contentWidth() - 5))}
-              {`  ${ctxPct().toFixed(0)}%`}
-            </text>
+          <box flexDirection="column" paddingLeft={1} paddingBottom={1}>
+            <For each={KEY_HINTS}>{(k) => <text fg={theme.dim}>{k}</text>}</For>
           </box>
         </box>
       </box>
@@ -544,8 +506,15 @@ function App() {
 
 function MessageView(props: { message: Message; syntax: SyntaxStyle; showReasoning: boolean }) {
   const m = () => props.message;
+  const isAssistant = () => m().role === "assistant";
   return (
-    <box flexDirection="column" marginBottom={1}>
+    <box
+      flexDirection="column"
+      marginBottom={1}
+      paddingLeft={isAssistant() ? 1 : 0}
+      paddingRight={isAssistant() ? 1 : 0}
+      backgroundColor={isAssistant() ? theme.assistantBg : undefined}
+    >
       <box height={1} flexDirection="row">
         <Show
           when={m().role === "user"}
@@ -679,18 +648,6 @@ function Sidebar(props: {
       borderColor={theme.border}
       backgroundColor={theme.panel}
     >
-      <box paddingLeft={1} paddingRight={1} paddingTop={1}>
-        <text fg={theme.accentStrong}>
-          <b>Context</b>
-        </text>
-      </box>
-      <box flexDirection="column" paddingLeft={1} paddingRight={1}>
-        <text fg={props.ctxColor}>{props.ctxPct.toFixed(1)}% used</text>
-        <text fg={theme.dim}>
-          {fmtTokens(props.ctxUsed)} / {fmtTokens(props.maxCtx)} tokens
-        </text>
-      </box>
-
       <box paddingLeft={1} paddingTop={1}>
         <text fg={theme.accentStrong}>
           <b>Session</b>
@@ -723,15 +680,36 @@ function Sidebar(props: {
 
       <box paddingLeft={1} paddingTop={1}>
         <text fg={theme.accentStrong}>
-          <b>Keys</b>
+          <b>Resources</b>
         </text>
       </box>
       <box flexDirection="column" paddingLeft={1} paddingRight={1}>
-        <text fg={theme.dim}>Enter · send</text>
-        <text fg={theme.dim}>Shift+Enter · newline</text>
-        <text fg={theme.dim}>Esc · stop</text>
-        <text fg={theme.dim}>Ctrl+T · thinking</text>
-        <text fg={theme.dim}>Ctrl+Q · quit</text>
+        <MetricBar
+          label="vram"
+          value={`${fmtBytes(h().vramUsed)}/${fmtBytes(h().vramTotal)}`}
+          pct={h().vramTotal ? ((h().vramUsed ?? 0) / h().vramTotal!) * 100 : 0}
+          width={26}
+        />
+        <MetricBar
+          label="ram"
+          value={
+            props.mem
+              ? `${fmtBytes(props.mem.total - props.mem.available)}/${fmtBytes(props.mem.total)}`
+              : "—"
+          }
+          pct={
+            props.mem && props.mem.total
+              ? ((props.mem.total - props.mem.available) / props.mem.total) * 100
+              : 0
+          }
+          width={26}
+        />
+        <MetricBar
+          label="context"
+          value={`${fmtTokens(props.ctxUsed)} / ${fmtTokens(props.maxCtx)}`}
+          pct={props.ctxPct}
+          width={26}
+        />
       </box>
 
       <box paddingLeft={1} paddingTop={1}>
@@ -757,28 +735,27 @@ function Line(props: { label: string; value: string }) {
   );
 }
 
-/** A slim footer memory bar: `[colored segments]  label used/total`. */
-function MemRow(props: {
-  label: string;
-  segs: { pct: number; color: string }[] | null;
-  used?: number;
-  total?: number;
-  width: number;
-}) {
-  // Keep these reactive — props update after /metrics arrives.
-  const readout = () => (props.total ? `  ${props.label} ${fmtBytes(props.used)} / ${fmtBytes(props.total)}` : `  ${props.label}`);
-  const barW = () => Math.max(4, props.width - readout().length);
+/** A horizontal metric bar for the sidebar: label + value on top, colored bar + % below. */
+function MetricBar(props: { label: string; value: string; pct: number; width: number }) {
+  const color = () => fillFor(props.pct);
+  const barW = () => Math.max(6, props.width - 5);
+  const filled = () => {
+    const c = Math.max(0, Math.min(100, props.pct));
+    return Math.max(0, Math.min(barW(), Math.round((c / 100) * barW())));
+  };
   return (
-    <box height={1} flexDirection="row" alignItems="center" paddingLeft={1} paddingRight={1}>
-      <Show
-        when={props.segs}
-        fallback={<text fg={theme.dim}>{"░".repeat(barW()) + readout()}</text>}
-      >
-        <For each={stackBar(barW(), props.segs!)}>
-          {(seg) => <text fg={seg.color}>{seg.chars}</text>}
-        </For>
-        <text fg={theme.dim}>{readout()}</text>
-      </Show>
+    <box flexDirection="column" marginBottom={1}>
+      <box flexDirection="row">
+        <text fg={theme.accentStrong}>
+          <b>{props.label}</b>
+        </text>
+        <text fg={theme.dim}>{`  ${props.value}`}</text>
+      </box>
+      <box flexDirection="row">
+        <text fg={color()}>{"█".repeat(filled())}</text>
+        <text fg={theme.dim}>{"░".repeat(barW() - filled())}</text>
+        <text fg={color()}>{` ${Math.round(props.pct)}%`}</text>
+      </box>
     </box>
   );
 }
