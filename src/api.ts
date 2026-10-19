@@ -172,10 +172,32 @@ function snapshot(m: Message): Message {
   };
 }
 
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+/** Build the OpenAI `content` for one message: plain string, or content parts when
+ *  it carries images and/or file text. File text is inlined into the text part;
+ *  images become `image_url` parts so the model actually sees them. */
+function buildContent(m: Message): string | ContentPart[] {
+  const images = m.images ?? [];
+  const files = m.files ?? [];
+  if (images.length === 0 && files.length === 0) return m.text;
+  let text = m.text;
+  for (const f of files) {
+    if (f.text) text += `${text ? "\n\n" : ""}--- ${f.name} ---\n${f.text}`;
+  }
+  const parts: ContentPart[] = [{ type: "text", text }];
+  for (const i of images) {
+    if (i.url) parts.push({ type: "image_url", image_url: { url: i.url } });
+  }
+  return parts;
+}
+
 export function apiMessages(messages: Message[]) {
   return messages
     .filter((m) => !(m.role === "assistant" && !m.text && !m.reasoning))
-    .map((m) => ({ role: m.role, content: m.text }));
+    .map((m) => ({ role: m.role, content: buildContent(m) }));
 }
 
 export type StreamOpts = {
@@ -250,7 +272,9 @@ export async function readAttachment(
   if (!(await file.exists())) throw new Error(`no such file: ${path}`);
   const name = path.split("/").pop() || path;
   const type = file.type || "";
+  const mb = Math.round(MAX_FILE_BYTES / 1024 / 1024);
   if (type.startsWith("image/")) {
+    if (file.size > MAX_FILE_BYTES) throw new Error(`image is larger than the ${mb} MB limit: ${name}`);
     const buf = Buffer.from(await file.arrayBuffer());
     const url = `data:${type};base64,${buf.toString("base64")}`;
     return { kind: "image", att: { name, url } };
@@ -260,7 +284,7 @@ export async function readAttachment(
     TEXT_EXT.test(name) ||
     /^(makefile|dockerfile|readme|license)$/i.test(name);
   if (!isText) throw new Error(`not a picture or a text file: ${name}`);
-  if (file.size > MAX_FILE_BYTES) throw new Error(`file is larger than 512 KB: ${name}`);
+  if (file.size > MAX_FILE_BYTES) throw new Error(`file is larger than the ${mb} MB limit: ${name}`);
   const text = await file.text();
   if (text.includes("\0")) throw new Error(`looks like a binary file: ${name}`);
   return { kind: "file", att: { name, text } };

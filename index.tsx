@@ -312,10 +312,10 @@ function App() {
         process.exit(0);
         break;
       case "/think":
-        if (["none", "low", "medium", "high"].includes(arg)) {
+        if (["none", "low", "medium", "high", "xhigh"].includes(arg)) {
           setThinking(arg);
           setStatus(`thinking: ${arg}`);
-        } else setStatus("usage: /think none|low|medium|high");
+        } else setStatus("usage: /think none|low|medium|high|xhigh");
         break;
       case "/show":
         setShowReasoning((v) => !v);
