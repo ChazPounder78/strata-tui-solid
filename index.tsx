@@ -117,6 +117,9 @@ function App() {
   const abort = { ctrl: undefined as AbortController | undefined };
   let composer: TextareaRenderable | undefined;
 
+  let healthTimer: ReturnType<typeof setInterval> | null = null;
+  let composerPoll: ReturnType<typeof setInterval> | null = null;
+
   onMount(async () => {
     try {
       const h = await health();
@@ -130,14 +133,27 @@ function App() {
     } catch {
       setStatus("transcript sync unavailable");
     }
-    const t = setInterval(async () => {
+    healthTimer = setInterval(async () => {
       try {
         const h = await health();
         if (h.model) setModel(h.model);
         if (h.max_context) setMaxCtx(h.max_context);
       } catch {}
     }, 15000);
-    onCleanup(() => clearInterval(t));
+    composerPoll = setInterval(() => {
+      try {
+        if (composer) {
+          const t = composer.plainText ?? "";
+          if (t !== input()) setInput(t);
+        }
+      } catch {}
+    }, 30);
+  });
+
+  onCleanup(() => {
+    if (healthTimer) clearInterval(healthTimer);
+    if (composerPoll) clearInterval(composerPoll);
+    abort.ctrl?.abort();
   });
 
   const send = async () => {
@@ -380,9 +396,20 @@ function App() {
             backgroundColor={theme.panel}
           >
             <textarea
-              ref={(el: TextareaRenderable) => (composer = el)}
+              ref={(el: TextareaRenderable) => {
+                composer = el;
+                if (composer) {
+                  const handler = () => {
+                    try {
+                      if (!composer) return;
+                      setInput(composer.plainText ?? "");
+                    } catch {}
+                  };
+                  composer.onContentChange = handler as any;
+                  handler();
+                }
+              }}
               onSubmit={submit}
-              onContentChange={(v) => setInput(String(v))}
               keyBindings={TEXTAREA_KEYS}
               wrapMode="word"
               placeholder="Ask anything…  (Enter to send · Shift+Enter newline)"
