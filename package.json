@@ -1,11 +1,13 @@
 {
   "name": "strata-tui-solid",
+  "version": "0.1.0",
+  "description": "OpenTUI + SolidJS terminal chat for the local Strata model",
   "module": "index.tsx",
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun index.tsx",
     "start": "bun index.tsx",
+    "dev": "bun index.tsx",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

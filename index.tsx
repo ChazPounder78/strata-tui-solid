@@ -1,169 +1,509 @@
-import { render } from "@opentui/solid"
-import { createSignal, onMount, For } from "solid-js"
-import { useKeyboard } from "@opentui/solid"
+import { render, useKeyboard, useRenderer } from "@opentui/solid";
+import { SyntaxStyle, type TextareaRenderable } from "@opentui/core";
+import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+  health,
+  loadTranscript,
+  nowMs,
+  readAttachment,
+  readClipboard,
+  saveTranscript,
+  stream,
+  type Attachment,
+  type Message,
+} from "./src/api";
+import { API_BASE, DEFAULT_MODEL, DEFAULT_THINKING } from "./src/config";
+import { bar, fmtTokens, hhmm, theme } from "./src/theme";
 
-const API_BASE = "http://127.0.0.1:8080"
-const SYNC_URL = "http://127.0.0.1:7577/transcript"
+const APP_VERSION = "strata-tui-solid";
 
-type Message = {
-  role: "user" | "assistant"
-  text: string
-  time: number
-  reasoning?: string
+const TEXTAREA_KEYS = [
+  { name: "return", action: "submit" as const },
+  { name: "kpenter", action: "submit" as const },
+  { name: "return", shift: true, action: "newline" as const },
+  { name: "return", meta: true, action: "newline" as const },
+];
+
+function estimateTokens(messages: Message[]): number {
+  let chars = 0;
+  for (const m of messages) chars += (m.text?.length ?? 0) + (m.reasoning?.length ?? 0);
+  return Math.ceil(chars / 4);
 }
 
-const App = () => {
-  const [messages, setMessages] = createSignal<Message[]>([])
-  const [input, setInput] = createSignal("")
-  const [model, setModel] = createSignal("local")
-  const [streaming, setStreaming] = createSignal(false)
-  const [status, setStatus] = createSignal("ready")
-  const [ctx, setCtx] = createSignal(0)
-  const [maxCtx, setMaxCtx] = createSignal(131072)
+function patchLast(prev: Message[], fn: (m: Message) => Message): Message[] {
+  const copy = prev.slice();
+  for (let i = copy.length - 1; i >= 0; i--) {
+    if (copy[i]!.role === "assistant") {
+      copy[i] = fn(copy[i]!);
+      break;
+    }
+  }
+  return copy;
+}
+
+function App() {
+  const renderer = useRenderer();
+  const syntax = createMemo(() =>
+    SyntaxStyle.fromStyles(
+      {
+        default: { fg: theme.text },
+        "markup.heading": { fg: theme.accent, bold: true },
+        "markup.bold": { bold: true },
+        "markup.italic": { italic: true },
+        "markup.raw": { fg: theme.warn },
+        "markup.link": { fg: theme.accent, underline: true },
+        keyword: { fg: "#bb9af7" },
+        string: { fg: theme.user },
+        number: { fg: "#ff9e64" },
+        comment: { fg: theme.dim, italic: true },
+        function: { fg: theme.accent },
+      },
+      renderer.nativeScene,
+    ),
+  );
+
+  const [messages, setMessages] = createSignal<Message[]>([]);
+  const [model, setModel] = createSignal(DEFAULT_MODEL);
+  const [thinking, setThinking] = createSignal(DEFAULT_THINKING);
+  const [showReasoning, setShowReasoning] = createSignal(true);
+  const [streaming, setStreaming] = createSignal(false);
+  const [status, setStatus] = createSignal("ready");
+  const [ctxUsed, setCtxUsed] = createSignal(0);
+  const [maxCtx, setMaxCtx] = createSignal(131072);
+  const [attachments, setAttachments] = createSignal<{ kind: "image" | "file"; att: Attachment }[]>([]);
+  const [tokens, setTokens] = createSignal({ prompt: 0, completion: 0, rate: 0 });
+  const abort = { ctrl: undefined as AbortController | undefined };
+  let composer: TextareaRenderable | undefined;
 
   onMount(async () => {
     try {
-      const h = await fetch(`${API_BASE}/health`).then(r => r.json()).catch(() => null)
-      if (h?.model) setModel(h.model)
-      if (h?.max_context) setMaxCtx(h.max_context)
-    } catch {}
+      const h = await health();
+      if (h.model) setModel(h.model);
+      if (h.max_context) setMaxCtx(h.max_context);
+    } catch {
+      setStatus(`engine offline at ${API_BASE}`);
+    }
     try {
-      const t = await fetch(SYNC_URL).then(r => r.json())
-      setMessages((t.messages || []) as Message[])
-    } catch {}
-    setInterval(async () => {
+      setMessages(await loadTranscript());
+    } catch {
+      setStatus("transcript sync unavailable");
+    }
+    const t = setInterval(async () => {
       try {
-        const h = await fetch(`${API_BASE}/health`, { cache: "no-store" }).then(r => r.json())
-        if (h?.max_context) setMaxCtx(h.max_context)
+        const h = await health();
+        if (h.model) setModel(h.model);
+        if (h.max_context) setMaxCtx(h.max_context);
       } catch {}
-    }, 15000)
-  })
+    }, 15000);
+    onCleanup(() => clearInterval(t));
+  });
 
   const send = async () => {
-    const text = input()
-    if (!text || text.trim() === "" || streaming()) return
-    const userMsg: Message = { role: "user", text, time: Date.now() }
-    const asstMsg: Message = { role: "assistant", text: "", time: Date.now() }
-    const msgsBefore = messages()
-    setMessages([...msgsBefore, userMsg, asstMsg])
-    setInput("")
-    setStreaming(true)
-    setStatus("generating")
+    const text = composer?.plainText ?? "";
+    const atts = attachments();
+    if ((!text.trim() && atts.length === 0) || streaming()) return;
+
+    const userMsg: Message = {
+      role: "user",
+      text,
+      time: nowMs(),
+      images: atts.filter((a) => a.kind === "image").map((a) => a.att),
+      files: atts.filter((a) => a.kind === "file").map((a) => a.att),
+    };
+    const asstMsg: Message = { role: "assistant", text: "", reasoning: "", time: nowMs() };
+    const before = messages();
+    setMessages([...before, userMsg, asstMsg]);
+    composer?.clear();
+    setAttachments([]);
+    setStreaming(true);
+    setStatus("generating");
+    const started = performance.now();
+    let sawReasoning = false;
+
+    abort.ctrl = new AbortController();
     try {
-      const res = await fetch(`${API_BASE}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: model(),
-          messages: [
-            ...msgsBefore.map(m => ({ role: m.role, content: m.text })),
-            { role: "user", content: text },
-          ],
-          stream: true,
-          reasoning_effort: "high",
-          temperature: 0.6,
-          top_p: 0.95,
-          top_k: 20,
-        }),
-      })
-      if (!res.body) throw new Error("no body")
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        const chunk = decoder.decode(value, { stream: true })
-        for (const line of chunk.split("\n")) {
-          const l = line.trim()
-          if (!l.startsWith("data:")) continue
-          const d = l.slice(5).trim()
-          if (d === "[DONE]") continue
-          try {
-            const j = JSON.parse(d)
-            const delta = j.choices?.[0]?.delta
-            if (delta?.content) {
-              setMessages((prev) => {
-                const last = prev[prev.length - 1]
-                if (last?.role === "assistant") {
-                  return [...prev.slice(0, -1), { ...last, text: last.text + delta.content }]
-                }
-                return prev
-              })
-            }
-            if (delta?.reasoning_content) {
-              setMessages((prev) => {
-                const last = prev[prev.length - 1]
-                if (last?.role === "assistant") {
-                  return [...prev.slice(0, -1), { ...last, reasoning: (last.reasoning || "") + delta.reasoning_content }]
-                }
-                return prev
-              })
-            }
-            if (j.usage?.prompt_tokens) {
-              setCtx(j.usage.prompt_tokens + (j.usage.completion_tokens || 0))
-            }
-          } catch {}
+      for await (const ev of stream({
+        model: model(),
+        messages: [...before, userMsg],
+        thinking: thinking(),
+        signal: abort.ctrl.signal,
+      })) {
+        if (ev.type === "reasoning") {
+          sawReasoning = true;
+          setMessages((prev) => patchLast(prev, (m) => ({ ...m, reasoning: (m.reasoning ?? "") + ev.text })));
+        } else if (ev.type === "content") {
+          setMessages((prev) => patchLast(prev, (m) => ({ ...m, text: m.text + ev.text })));
+        } else if (ev.type === "usage") {
+          const prompt = Number(ev.usage.prompt_tokens ?? 0);
+          const completion = Number(ev.usage.completion_tokens ?? 0);
+          const secs = (performance.now() - started) / 1000;
+          setCtxUsed(prompt + completion);
+          setTokens({ prompt, completion, rate: completion > 0 && secs > 0.25 ? completion / secs : 0 });
+          setMessages((prev) =>
+            patchLast(prev, (m) => ({
+              ...m,
+              meta: `${completion.toLocaleString()} tokens${
+                secs > 0.25 ? ` · ${(completion / secs).toFixed(1)} tok/s` : ""
+              }`,
+              thinkSecs: sawReasoning ? Math.round(secs * 10) / 10 : m.thinkSecs,
+            })),
+          );
         }
       }
-      try {
-        await fetch(SYNC_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: messages() }),
-        })
-      } catch {}
-      setStatus("ready")
+      setStatus("ready");
     } catch (e: any) {
-      setStatus(e?.message || "error")
+      if (e?.name === "AbortError") {
+        setMessages((prev) => patchLast(prev, (m) => ({ ...m, stopped: true })));
+        setStatus("stopped");
+      } else {
+        const msg = e?.message ?? String(e);
+        setStatus(msg);
+        setMessages((prev) => patchLast(prev, (m) => ({ ...m, error: msg })));
+      }
     } finally {
-      setStreaming(false)
+      setStreaming(false);
+      abort.ctrl = undefined;
+      const final = messages();
+      setCtxUsed((c) => (c > 0 ? c : estimateTokens(final)));
+      try {
+        await saveTranscript(final);
+      } catch {
+        setStatus("save failed");
+      }
     }
-  }
+  };
+
+  const stop = () => {
+    if (streaming()) abort.ctrl?.abort();
+  };
+
+  const attach = async (paths: string[]) => {
+    for (const p of paths) {
+      try {
+        const { kind, att } = await readAttachment(p);
+        setAttachments((a) => [...a, { kind, att }]);
+        setStatus(`attached ${kind}: ${att.name}`);
+      } catch (e: any) {
+        setStatus(e?.message ?? String(e));
+      }
+    }
+  };
+
+  const command = (line: string) => {
+    const parts = line.trim().split(/\s+/);
+    const cmd = (parts[0] ?? "").toLowerCase();
+    const arg = parts.slice(1).join(" ").replace(/^['"]|['"]$/g, "");
+    switch (cmd) {
+      case "/quit":
+      case "/exit":
+      case "/q":
+        process.exit(0);
+        break;
+      case "/think":
+        if (["none", "low", "medium", "high"].includes(arg)) {
+          setThinking(arg);
+          setStatus(`thinking: ${arg}`);
+        } else setStatus("usage: /think none|low|medium|high");
+        break;
+      case "/show":
+        setShowReasoning((v) => !v);
+        setStatus(`thinking shown: ${showReasoning() ? "on" : "off"}`);
+        break;
+      case "/reset":
+        setMessages([]);
+        setCtxUsed(0);
+        saveTranscript([]).catch(() => {});
+        setStatus("new conversation");
+        break;
+      case "/image":
+      case "/file":
+        if (arg) attach([arg]);
+        else setStatus(`usage: ${cmd} PATH`);
+        break;
+      case "/paste": {
+        const text = readClipboard();
+        if (text) {
+          composer?.insertText(text);
+          setStatus("pasted from clipboard");
+        } else setStatus("clipboard empty");
+        break;
+      }
+      case "/help":
+        setStatus("Enter send · Shift+Enter newline · Esc stop · /think /show /reset /image /paste /quit");
+        break;
+      default:
+        setStatus(`unknown command: ${cmd}`);
+    }
+  };
+
+  const submit = () => {
+    const text = composer?.plainText ?? "";
+    if (text.trim().startsWith("/")) {
+      command(text);
+      composer?.clear();
+      return;
+    }
+    send();
+  };
 
   useKeyboard((key) => {
-    if (key.eventType !== "press") return
-    if (key.name === "enter" && !key.shift && !key.ctrl && !key.alt && !key.meta) {
-      send()
+    if (key.eventType !== "press") return;
+    if (key.ctrl && key.name === "c") {
+      if (streaming()) return stop();
+      process.exit(0);
     }
-    if ((key.ctrl && key.name === "c") || (key.ctrl && key.name === "q")) {
-      process.exit(0)
+    if (key.ctrl && key.name === "q") process.exit(0);
+    if (key.name === "escape" && streaming()) stop();
+    if (key.ctrl && key.name === "t") {
+      setShowReasoning((v) => !v);
+      setStatus(`thinking shown: ${showReasoning() ? "on" : "off"}`);
     }
-  })
+  });
 
-  const pct = maxCtx() > 0 ? Math.round((ctx() / maxCtx()) * 100) : 0
-  const pctStr = pct > 100 ? "100%" : pct + "%"
+  const ctxPct = () => (maxCtx() > 0 ? Math.min(100, (ctxUsed() / maxCtx()) * 100) : 0);
+  const ctxColor = () => (ctxPct() > 85 ? theme.error : ctxPct() > 60 ? theme.warn : theme.accent);
 
   return (
-    <box flexDirection="row" width="100%" height="100%">
+    <box flexDirection="row" width="100%" height="100%" backgroundColor={theme.bg}>
       <box flexDirection="column" flexGrow={1} height="100%">
-        <box height={1} paddingX={1} border="single" borderColor="cyan">
-          <text>Strata · {model()}</text>
+        <box height={1} paddingLeft={1} paddingRight={1} backgroundColor={theme.panel}>
+          <box flexDirection="row" flexGrow={1}>
+            <text fg={theme.accent}>
+              <b>Strata</b>
+            </text>
+            <text fg={theme.dim}> · local chat</text>
+          </box>
+          <box flexDirection="row">
+            <text fg={theme.dim}>{streaming() ? "generating " : status() + " "}</text>
+            <text fg={theme.accent}>●</text>
+          </box>
         </box>
-        <scrollbox flexGrow={1} paddingX={1}>
-          <For each={messages()}>
-            {(m) => (
-              <box flexDirection="column" marginBottom={1}>
-                <text color={m.role === "user" ? "green" : "cyan"}>{m.role === "user" ? "You:" : "Assistant:"}</text>
-                {m.reasoning && <text color="gray">{m.reasoning}</text>}
-                <text>{m.text}</text>
-              </box>
-            )}
-          </For>
+
+        <scrollbox flexGrow={1} paddingLeft={1} paddingRight={1} stickyScroll stickyStart="bottom">
+          <Show
+            when={messages().length > 0}
+            fallback={<text fg={theme.dim}> new conversation — type a message, or /help</text>}
+          >
+            <For each={messages()}>{(m) => <MessageView message={m} syntax={syntax()} showReasoning={showReasoning()} />}</For>
+          </Show>
         </scrollbox>
-        <box height={3} paddingX={1} border="single" borderColor="blue">
-          <textarea value={input()} onInput={(v) => setInput(String(v))} onSubmit={send} flexGrow={1} />
+
+        <box flexDirection="column" backgroundColor={theme.panelAlt}>
+          <Show when={attachments().length > 0}>
+            <box paddingLeft={1} flexDirection="row">
+              <text fg={theme.dim}>attached: </text>
+              <text fg={theme.accent}>
+                {attachments()
+                  .map((a) => `${a.kind === "image" ? "▣" : "⧉"} ${a.att.name}`)
+                  .join("  ")}
+              </text>
+            </box>
+          </Show>
+          <box
+            height={3}
+            borderStyle="single"
+            borderColor={streaming() ? theme.border : theme.borderFocus}
+            paddingLeft={1}
+            paddingRight={1}
+            backgroundColor={theme.panel}
+          >
+            <textarea
+              ref={(el: TextareaRenderable) => (composer = el)}
+              onSubmit={submit}
+              keyBindings={TEXTAREA_KEYS}
+              placeholder="Ask anything…  (Enter to send · Shift+Enter newline)"
+              placeholderColor={theme.dim}
+              textColor={theme.text}
+              focusedTextColor={theme.text}
+              backgroundColor={theme.panel}
+              focusedBackgroundColor={theme.panel}
+              flexGrow={1}
+            />
+          </box>
+          <box height={1} paddingLeft={1} paddingRight={1}>
+            <box flexDirection="row" flexGrow={1}>
+              <text fg={theme.user}>Enter</text>
+              <text fg={theme.dim}> send · </text>
+              <text fg={theme.user}>Shift+Enter</text>
+              <text fg={theme.dim}> newline · </text>
+              <text fg={theme.user}>Esc</text>
+              <text fg={theme.dim}> stop · </text>
+              <text fg={theme.user}>Ctrl+T</text>
+              <text fg={theme.dim}> thinking · </text>
+              <text fg={theme.user}>Ctrl+Q</text>
+              <text fg={theme.dim}> quit</text>
+            </box>
+            <text fg={theme.dim}>{APP_VERSION}</text>
+          </box>
         </box>
       </box>
-      <box width={20} flexDirection="column" border="single" borderColor="gray">
-        <box height={1} paddingX={1}><text bold>Context</text></box>
-        <box flexDirection="column" paddingX={1}>
-          <text>{ctx().toLocaleString()} / {maxCtx().toLocaleString()}</text>
-          <text color={pct > 80 ? "yellow" : "gray"}>{pctStr}</text>
-          <text color="gray">{streaming() ? "generating" : status()}</text>
-        </box>
-      </box>
+
+      <Sidebar
+        model={model()}
+        thinking={thinking()}
+        ctxUsed={ctxUsed()}
+        maxCtx={maxCtx()}
+        ctxPct={ctxPct()}
+        ctxColor={ctxColor()}
+        tokens={tokens()}
+        count={messages().length}
+        streaming={streaming()}
+        status={status()}
+      />
     </box>
-  )
+  );
 }
 
-await render(() => <App />)
+function MessageView(props: { message: Message; syntax: SyntaxStyle; showReasoning: boolean }) {
+  const m = () => props.message;
+  return (
+    <box flexDirection="column" marginBottom={1}>
+      <box height={1} flexDirection="row">
+        <Show
+          when={m().role === "user"}
+          fallback={
+            <box flexDirection="row">
+              <text fg={theme.assistant}>
+                <b>▲ Strata</b>
+              </text>
+              <text fg={theme.dim}>
+                {"  "}
+                {hhmm(m().time)}
+                {m().meta ? ` · ${m().meta}` : ""}
+                {m().stopped ? " · stopped" : ""}
+              </text>
+            </box>
+          }
+        >
+          <box flexDirection="row">
+            <text fg={theme.user}>
+              <b>▌ You</b>
+            </text>
+            <text fg={theme.dim}>
+              {"  "}
+              {hhmm(m().time)}
+            </text>
+          </box>
+        </Show>
+      </box>
+
+      <Show when={m().role === "assistant" && props.showReasoning && m().reasoning}>
+        <box flexDirection="column" paddingLeft={2}>
+          <text fg={theme.dim}>┄ thinking ┄</text>
+          <text fg={theme.reasoning}>{m().reasoning}</text>
+        </box>
+      </Show>
+
+      <Show when={(m().files?.length ?? 0) + (m().images?.length ?? 0) > 0}>
+        <box flexDirection="row" paddingLeft={2}>
+          <text fg={theme.dim}>
+            {[
+              ...(m().images ?? []).map((i) => `▣ ${i.name}`),
+              ...(m().files ?? []).map((f) => `⧉ ${f.name}`),
+            ].join("   ")}
+          </text>
+        </box>
+      </Show>
+
+      <box paddingLeft={2} flexDirection="column">
+        <Show when={m().role === "assistant"} fallback={<text fg={theme.text}>{m().text}</text>}>
+          <Show when={m().text} fallback={<text fg={theme.dim}>…</text>}>
+            <markdown content={m().text} syntaxStyle={props.syntax} conceal fg={theme.text} />
+          </Show>
+        </Show>
+      </box>
+
+      <Show when={m().error}>
+        <box paddingLeft={2}>
+          <text fg={theme.error}>⚠ {m().error}</text>
+        </box>
+      </Show>
+    </box>
+  );
+}
+
+function Sidebar(props: {
+  model: string;
+  thinking: string;
+  ctxUsed: number;
+  maxCtx: number;
+  ctxPct: number;
+  ctxColor: string;
+  tokens: { prompt: number; completion: number; rate: number };
+  count: number;
+  streaming: boolean;
+  status: string;
+}) {
+  return (
+    <box
+      width={30}
+      flexDirection="column"
+      height="100%"
+      borderStyle="single"
+      borderColor={theme.border}
+      backgroundColor={theme.panel}
+    >
+      <box paddingLeft={1} paddingRight={1} paddingTop={1}>
+        <text fg={theme.accentStrong}>
+          <b>Context</b>
+        </text>
+      </box>
+      <box flexDirection="column" paddingLeft={1} paddingRight={1}>
+        <text fg={props.ctxColor}>{bar(props.ctxPct, 24)}</text>
+        <text fg={theme.dim}>
+          {fmtTokens(props.ctxUsed)} / {fmtTokens(props.maxCtx)} tokens
+        </text>
+        <text fg={props.ctxColor}>{props.ctxPct.toFixed(0)}% used</text>
+      </box>
+
+      <box paddingLeft={1} paddingTop={1}>
+        <text fg={theme.accentStrong}>
+          <b>Session</b>
+        </text>
+      </box>
+      <box flexDirection="column" paddingLeft={1} paddingRight={1}>
+        <Line label="model" value={props.model} />
+        <Line label="thinking" value={props.thinking} />
+        <Line label="messages" value={String(props.count)} />
+        <Line label="prompt" value={fmtTokens(props.tokens.prompt)} />
+        <Line label="output" value={fmtTokens(props.tokens.completion)} />
+        <Line label="speed" value={props.tokens.rate > 0 ? `${props.tokens.rate.toFixed(1)} tok/s` : "—"} />
+        <Line label="state" value={props.streaming ? "generating" : props.status} />
+      </box>
+
+      <box paddingLeft={1} paddingTop={1}>
+        <text fg={theme.accentStrong}>
+          <b>Keys</b>
+        </text>
+      </box>
+      <box flexDirection="column" paddingLeft={1} paddingRight={1}>
+        <text fg={theme.dim}>Enter · send</text>
+        <text fg={theme.dim}>Shift+Enter · newline</text>
+        <text fg={theme.dim}>Esc · stop</text>
+        <text fg={theme.dim}>Ctrl+T · thinking</text>
+        <text fg={theme.dim}>Ctrl+Q · quit</text>
+      </box>
+
+      <box paddingLeft={1} paddingTop={1}>
+        <text fg={theme.accentStrong}>
+          <b>Commands</b>
+        </text>
+      </box>
+      <box flexDirection="column" paddingLeft={1} paddingRight={1}>
+        <text fg={theme.dim}>/think /show /reset</text>
+        <text fg={theme.dim}>/image /paste /help</text>
+      </box>
+    </box>
+  );
+}
+
+function Line(props: { label: string; value: string }) {
+  return (
+    <box flexDirection="row">
+      <text fg={theme.dim}>{props.label.padEnd(9)}</text>
+      <text fg={theme.text}>{props.value}</text>
+    </box>
+  );
+}
+
+await render(() => <App />, { exitOnCtrlC: false });
