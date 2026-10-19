@@ -268,8 +268,15 @@ function App() {
   return (
     <box flexDirection="row" width="100%" height="100%" backgroundColor={theme.bg}>
       <box flexDirection="column" flexGrow={1} height="100%">
-        <box height={1} paddingLeft={1} paddingRight={1} backgroundColor={theme.panel}>
-          <box flexDirection="row" flexGrow={1}>
+        <box
+          height={2}
+          flexDirection="row"
+          justifyContent="space-between"
+          paddingLeft={1}
+          paddingRight={1}
+          backgroundColor={theme.panel}
+        >
+          <box flexDirection="row">
             <text fg={theme.accent}>
               <b>Strata</b>
             </text>
@@ -281,7 +288,16 @@ function App() {
           </box>
         </box>
 
-        <scrollbox flexGrow={1} paddingLeft={1} paddingRight={1} stickyScroll stickyStart="bottom">
+        <scrollbox
+          flexGrow={1}
+          flexBasis={0}
+          flexShrink={1}
+          minHeight={0}
+          paddingLeft={1}
+          paddingRight={1}
+          stickyScroll
+          stickyStart="bottom"
+        >
           <Show
             when={messages().length > 0}
             fallback={<text fg={theme.dim}> new conversation — type a message, or /help</text>}
@@ -290,7 +306,7 @@ function App() {
           </Show>
         </scrollbox>
 
-        <box flexDirection="column" backgroundColor={theme.panelAlt}>
+        <box flexDirection="column" flexShrink={0} backgroundColor={theme.panelAlt}>
           <Show when={attachments().length > 0}>
             <box paddingLeft={1} flexDirection="row">
               <text fg={theme.dim}>attached: </text>
@@ -322,12 +338,18 @@ function App() {
               flexGrow={1}
             />
           </box>
-          <box height={1} paddingLeft={1} paddingRight={1}>
-            <box flexDirection="row" flexGrow={1}>
+          <box
+            height={1}
+            flexDirection="row"
+            justifyContent="space-between"
+            paddingLeft={1}
+            paddingRight={1}
+          >
+            <box flexDirection="row">
               <text fg={theme.user}>Enter</text>
               <text fg={theme.dim}> send · </text>
               <text fg={theme.user}>Shift+Enter</text>
-              <text fg={theme.dim}> newline · </text>
+              <text fg={theme.dim}> nl · </text>
               <text fg={theme.user}>Esc</text>
               <text fg={theme.dim}> stop · </text>
               <text fg={theme.user}>Ctrl+T</text>
