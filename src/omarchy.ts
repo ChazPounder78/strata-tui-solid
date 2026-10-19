@@ -34,7 +34,7 @@ export function applyOmarchyTheme(): boolean {
     theme.borderFocus = c.accent ?? theme.borderFocus;
     theme.code = c.darker_background ?? theme.code;
     theme.chatBg = c.dark_background ?? c.darker_background ?? theme.chatBg;
-    theme.assistantBg = c.lighter_background ?? theme.assistantBg;
+    theme.userBg = c.lighter_background ?? theme.userBg;
 
     theme.accent = c.accent ?? theme.accent;
     theme.accentStrong = c.bright_magenta ?? c.accent ?? theme.accentStrong;

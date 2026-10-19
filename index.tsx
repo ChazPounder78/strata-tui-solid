@@ -29,7 +29,7 @@ const TEXTAREA_KEYS = [
 
 const MAX_COMPOSER_ROWS = 12;
 
-const KEY_HINTS = ["Enter · send", "Shift+Enter · newline", "Esc · stop", "Ctrl+T · thinking", "Ctrl+Q · quit"];
+const KEY_HINTS = "Enter send · Shift+Enter newline · Esc stop · Ctrl+T thinking · Ctrl+Q quit";
 
 /** Rough count of wrapped rows a textarea buffer occupies at the given width. */
 function visualRows(text: string, width: number): number {
@@ -384,8 +384,8 @@ function App() {
     return Math.max(8, main - 4); // minus border + padding
   };
   // Rows below the chat: header(2), composer borders(2), spacer(1), key
-  // hints(5) and a minimum chat area(6).
-  const composerMaxRows = () => Math.max(1, dims().height - 16);
+  // hints(1) and a minimum chat area(6).
+  const composerMaxRows = () => Math.max(1, dims().height - 12);
   const composerRows = () =>
     Math.min(MAX_COMPOSER_ROWS, composerMaxRows(), visualRows(input(), contentWidth()));
   const composerHeight = () => composerRows() + 2; // + top/bottom border
@@ -478,8 +478,8 @@ function App() {
             />
           </box>
           <box height={1} backgroundColor={theme.panelAlt} />
-          <box flexDirection="column" paddingLeft={1} paddingBottom={1}>
-            <For each={KEY_HINTS}>{(k) => <text fg={theme.dim}>{k}</text>}</For>
+          <box flexDirection="row" paddingLeft={1} paddingRight={1}>
+            <text fg={theme.dim}>{KEY_HINTS}</text>
           </box>
         </box>
       </box>
@@ -506,14 +506,14 @@ function App() {
 
 function MessageView(props: { message: Message; syntax: SyntaxStyle; showReasoning: boolean }) {
   const m = () => props.message;
-  const isAssistant = () => m().role === "assistant";
+  const isUser = () => m().role === "user";
   return (
     <box
       flexDirection="column"
       marginBottom={1}
-      paddingLeft={isAssistant() ? 1 : 0}
-      paddingRight={isAssistant() ? 1 : 0}
-      backgroundColor={isAssistant() ? theme.assistantBg : undefined}
+      paddingLeft={isUser() ? 1 : 0}
+      paddingRight={isUser() ? 1 : 0}
+      backgroundColor={isUser() ? theme.userBg : undefined}
     >
       <box height={1} flexDirection="row">
         <Show

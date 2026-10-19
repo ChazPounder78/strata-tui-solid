@@ -14,8 +14,8 @@ export const theme = {
   error: "#f7768e",
   reasoning: "#7a7f95",
   code: "#1a1f2b",
-  chatBg: "#0f131a", // subtle panel behind the chat text
-  assistantBg: "#161b26", // slightly lifted card behind model output
+  chatBg: "#0f131a", // subtle recessed panel behind the chat
+  userBg: "#1d2433", // gray card behind user ("me") messages
 };
 
 /** A single colored run of a stacked bar. */
