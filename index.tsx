@@ -1,4 +1,4 @@
-import { render, useKeyboard, useRenderer } from "@opentui/solid";
+import { render, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
 import { SyntaxStyle, type TextareaRenderable } from "@opentui/core";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
@@ -43,6 +43,8 @@ function patchLast(prev: Message[], fn: (m: Message) => Message): Message[] {
 
 function App() {
   const renderer = useRenderer();
+  const dims = useTerminalDimensions();
+  const wide = () => dims().width >= 100;
   const syntax = createMemo(() =>
     SyntaxStyle.fromStyles(
       {
@@ -333,23 +335,27 @@ function App() {
               <text fg={theme.user}>Ctrl+Q</text>
               <text fg={theme.dim}> quit</text>
             </box>
-            <text fg={theme.dim}>{APP_VERSION}</text>
+            <Show when={!wide()} fallback={<text fg={theme.dim}>{APP_VERSION}</text>}>
+              <text fg={ctxColor()}>ctx {ctxPct().toFixed(0)}%</text>
+            </Show>
           </box>
         </box>
       </box>
 
-      <Sidebar
-        model={model()}
-        thinking={thinking()}
-        ctxUsed={ctxUsed()}
-        maxCtx={maxCtx()}
-        ctxPct={ctxPct()}
-        ctxColor={ctxColor()}
-        tokens={tokens()}
-        count={messages().length}
-        streaming={streaming()}
-        status={status()}
-      />
+      <Show when={wide()}>
+        <Sidebar
+          model={model()}
+          thinking={thinking()}
+          ctxUsed={ctxUsed()}
+          maxCtx={maxCtx()}
+          ctxPct={ctxPct()}
+          ctxColor={ctxColor()}
+          tokens={tokens()}
+          count={messages().length}
+          streaming={streaming()}
+          status={status()}
+        />
+      </Show>
     </box>
   );
 }
