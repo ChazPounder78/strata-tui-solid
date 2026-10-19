@@ -51,6 +51,12 @@ export function bar(pct: number, width = 12): string {
   return "█".repeat(filled) + "░".repeat(Math.max(0, width - filled));
 }
 
+/** Fill color by usage percentage — same accent → warn → error scale as the context bar. */
+export function fillFor(pct: number): string {
+  const c = Math.max(0, Math.min(100, pct));
+  return c > 85 ? theme.error : c > 60 ? theme.warn : theme.accent;
+}
+
 /** Human-readable bytes, e.g. 22.1G / 60.3M. */
 export function fmtBytes(n: number | undefined | null): string {
   if (n == null || Number.isNaN(n)) return "—";

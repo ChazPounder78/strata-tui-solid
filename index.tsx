@@ -17,7 +17,8 @@ import {
   type Message,
 } from "./src/api";
 import { API_BASE, DEFAULT_MAX_CTX, DEFAULT_MODEL, DEFAULT_THINKING } from "./src/config";
-import { bar, fmtBytes, fmtTokens, hhmm, stackBar, theme, type Seg } from "./src/theme";
+import { bar, fillFor, fmtBytes, fmtTokens, hhmm, stackBar, theme, type Seg } from "./src/theme";
+import { applyOmarchyTheme } from "./src/omarchy";
 
 const TEXTAREA_KEYS = [
   { name: "return", action: "submit" as const },
@@ -373,16 +374,16 @@ function App() {
   });
 
   const ctxPct = () => (maxCtx() > 0 ? Math.min(100, (ctxUsed() / maxCtx()) * 100) : 0);
-  const ctxColor = () => (ctxPct() > 85 ? theme.error : ctxPct() > 60 ? theme.warn : theme.accent);
+  const ctxColor = () => fillFor(ctxPct());
 
-  // VRAM split: what Strata/model uses vs free. Muted palette.
+  // VRAM split: what Strata/model uses vs free — colored like the context bar.
   const vramSegs = () => {
     const { vramUsed = 0, vramTotal = 0 } = hw();
     if (!vramTotal) return null;
     const usedPct = Math.max(0, Math.min(100, (vramUsed / vramTotal) * 100));
     return [
-      { pct: usedPct, color: theme.memStrata },
-      { pct: 100 - usedPct, color: theme.memFree },
+      { pct: usedPct, color: fillFor(usedPct) },
+      { pct: 100 - usedPct, color: theme.dim },
     ];
   };
   // RAM split: Strata/active (total-available), reclaimable cache, free.
@@ -393,9 +394,9 @@ function App() {
     const used = Math.max(0, m.total - m.available - cached);
     const free = Math.max(0, m.free);
     return [
-      { pct: used, color: theme.memStrata },
-      { pct: cached, color: theme.memCached },
-      { pct: free, color: theme.memFree },
+      { pct: used, color: fillFor(used) },
+      { pct: cached, color: theme.assistant },
+      { pct: free, color: theme.dim },
     ];
   };
 
@@ -756,7 +757,7 @@ function Line(props: { label: string; value: string }) {
   );
 }
 
-/** A slim footer memory bar: `label [colored segments]  used/total`. */
+/** A slim footer memory bar: `[colored segments]  label used/total`. */
 function MemRow(props: {
   label: string;
   segs: { pct: number; color: string }[] | null;
@@ -765,14 +766,13 @@ function MemRow(props: {
   width: number;
 }) {
   // Keep these reactive — props update after /metrics arrives.
-  const readout = () => (props.total ? `  ${fmtBytes(props.used)} / ${fmtBytes(props.total)}` : "");
-  const barW = () => Math.max(4, props.width - props.label.length - 1 - readout().length);
+  const readout = () => (props.total ? `  ${props.label} ${fmtBytes(props.used)} / ${fmtBytes(props.total)}` : `  ${props.label}`);
+  const barW = () => Math.max(4, props.width - readout().length);
   return (
     <box height={1} flexDirection="row" alignItems="center" paddingLeft={1} paddingRight={1}>
-      <text fg={theme.dim}>{props.label + " "}</text>
       <Show
         when={props.segs}
-        fallback={<text fg={theme.dim}>{props.total ? "" : "—"}</text>}
+        fallback={<text fg={theme.dim}>{"░".repeat(barW()) + readout()}</text>}
       >
         <For each={stackBar(barW(), props.segs!)}>
           {(seg) => <text fg={seg.color}>{seg.chars}</text>}
@@ -783,5 +783,9 @@ function MemRow(props: {
   );
 }
 
+
+// Adopt the current Omarchy/Quickshell theme as the default palette (falls back
+// to the built-in colors if there's no theme file). Must run before first render.
+applyOmarchyTheme();
 
 await render(() => <App />, { exitOnCtrlC: false });
