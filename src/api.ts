@@ -32,6 +32,65 @@ export type Slots = Array<{
   [k: string]: unknown;
 }>;
 
+export type MetricsHw = {
+  gpu_util?: number;
+  gpu_mem_used?: number;
+  gpu_mem_total?: number;
+  gpu_temp?: number;
+  gpu_power?: number;
+  cpu?: number;
+  ram_used?: number;
+  ram_total?: number;
+  tok_s?: number;
+  prefill_tok_s_mean?: number;
+};
+
+export type MetricsStatic = {
+  gpu_name?: string;
+  cpu_name?: string;
+  cores?: number;
+  threads?: number;
+};
+
+export type MetricsLive = {
+  state?: string | null;
+  tok_s?: number | null;
+  prefill_tok_s_mean?: number | null;
+};
+
+export type MetricsReq = {
+  decode_tok_s?: number | null;
+  hit_rate?: number | null;
+  drafts_offered?: number;
+  drafts_accepted?: number;
+};
+
+export type MetricsTotals = {
+  requests?: number;
+  output_tokens?: number;
+  prompt_tokens?: number;
+  drafts_offered?: number;
+  drafts_accepted?: number;
+};
+
+export type Metrics = {
+  hardware?: MetricsHw;
+  hardware_static?: MetricsStatic;
+  live?: MetricsLive;
+  requests?: MetricsReq[];
+  totals?: MetricsTotals;
+  engine?: Record<string, unknown>;
+};
+
+/** /proc/meminfo snapshot (bytes). */
+export type MemInfo = {
+  total: number;
+  free: number;
+  available: number;
+  cached: number;
+  buffers: number;
+};
+
 export type StreamEvent =
   | { type: "reasoning"; text: string }
   | { type: "content"; text: string }
@@ -52,6 +111,35 @@ export async function slots(): Promise<Slots> {
   const res = await fetch(`${API_BASE}/slots`, { cache: "no-store" });
   if (!res.ok) throw new Error(`slots ${res.status}`);
   return (await res.json()) as Slots;
+}
+
+export async function metrics(): Promise<Metrics> {
+  const res = await fetch(`${API_BASE}/metrics`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`metrics ${res.status}`);
+  return (await res.json()) as Metrics;
+}
+
+/** Read the RAM used/cached/free split straight from /proc/meminfo (one file, cheap). */
+export async function meminfo(): Promise<MemInfo | null> {
+  try {
+    const text = await Bun.file("/proc/meminfo").text();
+    const vals: Record<string, number> = {};
+    for (const line of text.split("\n")) {
+      const idx = line.indexOf(":");
+      if (idx < 0) continue;
+      const key = line.slice(0, idx).trim();
+      const num = parseInt(line.slice(idx + 1).trim().split(/\s+/)[0] ?? "", 10);
+      if (!Number.isNaN(num)) vals[key] = num * 1024; // kB → bytes
+    }
+    const total = vals["MemTotal"] ?? 0;
+    const free = vals["MemFree"] ?? 0;
+    const available = vals["MemAvailable"] ?? free;
+    const cached = (vals["Cached"] ?? 0) + (vals["Buffers"] ?? 0);
+    if (!total) return null;
+    return { total, free, available, cached, buffers: vals["Buffers"] ?? 0 };
+  } catch {
+    return null;
+  }
 }
 
 export async function loadTranscript(): Promise<Message[]> {

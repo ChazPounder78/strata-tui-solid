@@ -4,6 +4,8 @@ import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-j
 import {
   health,
   loadTranscript,
+  meminfo,
+  metrics,
   nowMs,
   readAttachment,
   readClipboard,
@@ -11,10 +13,11 @@ import {
   slots,
   stream,
   type Attachment,
+  type MemInfo,
   type Message,
 } from "./src/api";
 import { API_BASE, DEFAULT_MAX_CTX, DEFAULT_MODEL, DEFAULT_THINKING } from "./src/config";
-import { bar, fmtTokens, hhmm, theme } from "./src/theme";
+import { bar, fmtBytes, fmtTokens, hhmm, stackBar, theme, type Seg } from "./src/theme";
 
 const TEXTAREA_KEYS = [
   { name: "return", action: "submit" as const },
@@ -107,6 +110,24 @@ function App() {
   const [attachments, setAttachments] = createSignal<{ kind: "image" | "file"; att: Attachment }[]>([]);
   const [tokens, setTokens] = createSignal({ prompt: 0, completion: 0, rate: 0 });
   const [input, setInput] = createSignal("");
+  // Server hardware + speed snapshot (from /metrics) and RAM split (from /proc/meminfo).
+  const [hw, setHw] = createSignal<{
+    gpuUtil?: number;
+    vramUsed?: number;
+    vramTotal?: number;
+    gpuTemp?: number;
+    gpuPower?: number;
+    cpu?: number;
+    ramUsed?: number;
+    ramTotal?: number;
+    cpuName?: string;
+    cores?: number;
+    decode?: number | null;
+    prefill?: number | null;
+    accept?: number | null;
+    hit?: number | null;
+  }>({});
+  const [mem, setMem] = createSignal<MemInfo | null>(null);
   const abort = { ctrl: undefined as AbortController | undefined };
   let composer: TextareaRenderable | undefined;
 
@@ -126,6 +147,39 @@ function App() {
         if (slot.n_ctx) setMaxCtx(slot.n_ctx);
         setCtxUsed(slot.n_prompt_tokens ?? 0);
       }
+    } catch {}
+    try {
+      const m = await metrics();
+      const hw_ = m.hardware ?? {};
+      const st = m.hardware_static ?? {};
+      const live = m.live ?? {};
+      const last = m.requests?.[0] ?? {};
+      const tot = m.totals ?? {};
+      // MTP accept = accepted/offered drafts (session-wide when available).
+      const offered = tot.drafts_offered ?? last.drafts_offered ?? 0;
+      const accepted = tot.drafts_accepted ?? last.drafts_accepted ?? 0;
+      const accept = offered > 0 ? accepted / offered : null;
+      // Prefer live decode tok/s while generating; fall back to last request.
+      const decode = live.tok_s ?? last.decode_tok_s ?? hw_.tok_s ?? null;
+      setHw({
+        gpuUtil: hw_.gpu_util,
+        vramUsed: hw_.gpu_mem_used,
+        vramTotal: hw_.gpu_mem_total,
+        gpuTemp: hw_.gpu_temp,
+        gpuPower: hw_.gpu_power,
+        cpu: hw_.cpu,
+        ramUsed: hw_.ram_used,
+        ramTotal: hw_.ram_total,
+        cpuName: st.cpu_name,
+        cores: st.cores ?? st.threads,
+        decode,
+        prefill: live.prefill_tok_s_mean ?? hw_.prefill_tok_s_mean ?? null,
+        accept,
+        hit: last.hit_rate ?? null,
+      });
+    } catch {}
+    try {
+      setMem(await meminfo());
     } catch {}
   };
 
@@ -321,14 +375,38 @@ function App() {
   const ctxPct = () => (maxCtx() > 0 ? Math.min(100, (ctxUsed() / maxCtx()) * 100) : 0);
   const ctxColor = () => (ctxPct() > 85 ? theme.error : ctxPct() > 60 ? theme.warn : theme.accent);
 
+  // VRAM split: what Strata/model uses vs free. Muted palette.
+  const vramSegs = () => {
+    const { vramUsed = 0, vramTotal = 0 } = hw();
+    if (!vramTotal) return null;
+    const usedPct = Math.max(0, Math.min(100, (vramUsed / vramTotal) * 100));
+    return [
+      { pct: usedPct, color: theme.memStrata },
+      { pct: 100 - usedPct, color: theme.memFree },
+    ];
+  };
+  // RAM split: Strata/active (total-available), reclaimable cache, free.
+  const ramSegs = () => {
+    const m = mem();
+    if (!m || !m.total) return null;
+    const cached = Math.min(m.cached, m.total - m.free);
+    const used = Math.max(0, m.total - m.available - cached);
+    const free = Math.max(0, m.free);
+    return [
+      { pct: used, color: theme.memStrata },
+      { pct: cached, color: theme.memCached },
+      { pct: free, color: theme.memFree },
+    ];
+  };
+
   // The composer grows upward with typed content; the footer stays pinned below.
   const contentWidth = () => {
     const main = dims().width - (wide() ? 30 : 0);
     return Math.max(8, main - 4); // minus border + padding
   };
-  // Rows we can afford for the composer while keeping the header (2),
-  // spacer (1), footer (1), borders (2) and a minimum chat area (6) visible.
-  const composerMaxRows = () => Math.max(1, dims().height - 12);
+  // Rows the footer occupies: vram(1) + ram(1) + context(1) + spacer(1) = 4,
+  // plus header(2), composer borders(2) and a minimum chat area(6).
+  const composerMaxRows = () => Math.max(1, dims().height - 14);
   const composerRows = () =>
     Math.min(MAX_COMPOSER_ROWS, composerMaxRows(), visualRows(input(), contentWidth()));
   const composerHeight = () => composerRows() + 2; // + top/bottom border
@@ -420,6 +498,14 @@ function App() {
             />
           </box>
           <box height={1} backgroundColor={theme.panelAlt} />
+          <MemRow label="vram" segs={vramSegs()} used={hw().vramUsed} total={hw().vramTotal} width={contentWidth()} />
+          <MemRow
+            label="ram"
+            segs={ramSegs()}
+            used={mem() ? mem()!.total - mem()!.available : undefined}
+            total={mem()?.total}
+            width={contentWidth()}
+          />
           <box
             height={1}
             flexDirection="row"
@@ -447,6 +533,8 @@ function App() {
           count={messages().length}
           streaming={streaming()}
           status={status()}
+          hw={hw()}
+          mem={mem()}
         />
       </Show>
     </box>
@@ -532,7 +620,55 @@ function Sidebar(props: {
   count: number;
   streaming: boolean;
   status: string;
+  hw: {
+    gpuUtil?: number;
+    vramUsed?: number;
+    vramTotal?: number;
+    gpuTemp?: number;
+    gpuPower?: number;
+    cpu?: number;
+    ramUsed?: number;
+    ramTotal?: number;
+    cpuName?: string;
+    cores?: number;
+    decode?: number | null;
+    prefill?: number | null;
+    accept?: number | null;
+    hit?: number | null;
+  };
+  mem: { total: number; free: number; available: number; cached: number } | null;
 }) {
+  const h = () => props.hw;
+  const shortCpu = () => {
+    const n = h().cpuName ?? "";
+    const m = n.match(/(\d{3,4}[A-Z0-9]*)/);
+    return m ? m[1]! : n.split(" ").slice(0, 3).join(" ");
+  };
+  const fmtSpeed = (v?: number | null) => (v != null && v > 0 ? `${v.toFixed(1)} tok/s` : "—");
+  const fmtPct = (v?: number | null) => (v != null ? `${Math.round(v * 100)}%` : "—");
+  const fmtRam = () => {
+    const w = h();
+    if (w.ramTotal != null && w.ramUsed != null && w.ramTotal > 0) {
+      return `${fmtBytes(w.ramUsed)}/${fmtBytes(w.ramTotal)}`;
+    }
+    const m = props.mem;
+    return m ? `${fmtBytes(m.total - m.available)}/${fmtBytes(m.total)}` : "—";
+  };
+  const fmtGpu = () => {
+    const w = h();
+    const util = w.gpuUtil != null ? `${w.gpuUtil}%` : "—";
+    return w.vramTotal ? `${util} · ${fmtBytes(w.vramUsed)}/${fmtBytes(w.vramTotal)}` : util;
+  };
+  const fmtGpuStats = () => {
+    const w = h();
+    const temp = w.gpuTemp != null ? `${w.gpuTemp}°C` : "—";
+    return w.gpuPower != null ? `${temp} · ${w.gpuPower}W` : temp;
+  };
+  const fmtCpu = () => {
+    const w = h();
+    const pct = w.cpu != null ? `${w.cpu.toFixed(1)}%` : "—";
+    return w.cores ? `${pct} · ${shortCpu()} ${w.cores}c` : pct;
+  };
   return (
     <box
       width={30}
@@ -565,8 +701,23 @@ function Sidebar(props: {
         <Line label="messages" value={String(props.count)} />
         <Line label="prompt" value={fmtTokens(props.tokens.prompt)} />
         <Line label="output" value={fmtTokens(props.tokens.completion)} />
-        <Line label="speed" value={props.tokens.rate > 0 ? `${props.tokens.rate.toFixed(1)} tok/s` : "—"} />
+        <Line label="decode" value={fmtSpeed(h().decode)} />
+        <Line label="prefill" value={fmtSpeed(h().prefill)} />
+        <Line label="mtp" value={fmtPct(h().accept)} />
+        <Line label="expert" value={fmtPct(h().hit)} />
         <Line label="state" value={props.streaming ? "generating" : props.status} />
+      </box>
+
+      <box paddingLeft={1} paddingTop={1}>
+        <text fg={theme.accentStrong}>
+          <b>Hardware</b>
+        </text>
+      </box>
+      <box flexDirection="column" paddingLeft={1} paddingRight={1}>
+        <Line label="gpu" value={fmtGpu()} />
+        <Line label="gpu temp" value={fmtGpuStats()} />
+        <Line label="ram" value={fmtRam()} />
+        <Line label="cpu" value={fmtCpu()} />
       </box>
 
       <box paddingLeft={1} paddingTop={1}>
@@ -596,12 +747,41 @@ function Sidebar(props: {
 }
 
 function Line(props: { label: string; value: string }) {
+  const fit = (v: string) => (v.length > 17 ? v.slice(0, 16) + "…" : v);
   return (
     <box flexDirection="row">
       <text fg={theme.dim}>{props.label.padEnd(9)}</text>
-      <text fg={theme.text}>{props.value}</text>
+      <text fg={theme.text}>{fit(props.value)}</text>
     </box>
   );
 }
+
+/** A slim footer memory bar: `label [colored segments]  used/total`. */
+function MemRow(props: {
+  label: string;
+  segs: { pct: number; color: string }[] | null;
+  used?: number;
+  total?: number;
+  width: number;
+}) {
+  // Keep these reactive — props update after /metrics arrives.
+  const readout = () => (props.total ? `  ${fmtBytes(props.used)} / ${fmtBytes(props.total)}` : "");
+  const barW = () => Math.max(4, props.width - props.label.length - 1 - readout().length);
+  return (
+    <box height={1} flexDirection="row" alignItems="center" paddingLeft={1} paddingRight={1}>
+      <text fg={theme.dim}>{props.label + " "}</text>
+      <Show
+        when={props.segs}
+        fallback={<text fg={theme.dim}>{props.total ? "" : "—"}</text>}
+      >
+        <For each={stackBar(barW(), props.segs!)}>
+          {(seg) => <text fg={seg.color}>{seg.chars}</text>}
+        </For>
+        <text fg={theme.dim}>{readout()}</text>
+      </Show>
+    </box>
+  );
+}
+
 
 await render(() => <App />, { exitOnCtrlC: false });
