@@ -24,10 +24,49 @@ const TEXTAREA_KEYS = [
   { name: "return", meta: true, action: "newline" as const },
 ];
 
+const MAX_COMPOSER_ROWS = 12;
+
 function estimateTokens(messages: Message[]): number {
   let chars = 0;
   for (const m of messages) chars += (m.text?.length ?? 0) + (m.reasoning?.length ?? 0);
   return Math.ceil(chars / 4);
+}
+
+/** Rough count of wrapped rows a textarea buffer occupies at the given width. */
+function visualRows(text: string, width: number): number {
+  const w = Math.max(1, width);
+  let total = 0;
+  for (const line of text.split("\n")) {
+    if (line.length === 0) {
+      total += 1;
+      continue;
+    }
+    let rows = 1;
+    let cur = 0;
+    for (const word of line.split(" ")) {
+      const len = word.length;
+      if (cur === 0) {
+        if (len > w) {
+          rows += Math.floor(len / w);
+          cur = len % w || w;
+        } else {
+          cur = len;
+        }
+      } else if (cur + 1 + len <= w) {
+        cur += 1 + len;
+      } else {
+        rows += 1;
+        if (len > w) {
+          rows += Math.floor(len / w);
+          cur = len % w || w;
+        } else {
+          cur = len;
+        }
+      }
+    }
+    total += rows;
+  }
+  return total;
 }
 
 function patchLast(prev: Message[], fn: (m: Message) => Message): Message[] {
@@ -74,6 +113,7 @@ function App() {
   const [maxCtx, setMaxCtx] = createSignal(131072);
   const [attachments, setAttachments] = createSignal<{ kind: "image" | "file"; att: Attachment }[]>([]);
   const [tokens, setTokens] = createSignal({ prompt: 0, completion: 0, rate: 0 });
+  const [input, setInput] = createSignal("");
   const abort = { ctrl: undefined as AbortController | undefined };
   let composer: TextareaRenderable | undefined;
 
@@ -116,6 +156,7 @@ function App() {
     const before = messages();
     setMessages([...before, userMsg, asstMsg]);
     composer?.clear();
+    setInput("");
     setAttachments([]);
     setStreaming(true);
     setStatus("generating");
@@ -243,6 +284,7 @@ function App() {
     if (text.trim().startsWith("/")) {
       command(text);
       composer?.clear();
+      setInput("");
       return;
     }
     send();
@@ -264,6 +306,18 @@ function App() {
 
   const ctxPct = () => (maxCtx() > 0 ? Math.min(100, (ctxUsed() / maxCtx()) * 100) : 0);
   const ctxColor = () => (ctxPct() > 85 ? theme.error : ctxPct() > 60 ? theme.warn : theme.accent);
+
+  // The composer grows upward with typed content; the footer stays pinned below.
+  const contentWidth = () => {
+    const main = dims().width - (wide() ? 30 : 0);
+    return Math.max(8, main - 4); // minus border + padding
+  };
+  // Rows we can afford for the composer while keeping the header (2),
+  // spacer (1), footer (1), borders (2) and a minimum chat area (6) visible.
+  const composerMaxRows = () => Math.max(1, dims().height - 12);
+  const composerRows = () =>
+    Math.min(MAX_COMPOSER_ROWS, composerMaxRows(), visualRows(input(), contentWidth()));
+  const composerHeight = () => composerRows() + 2; // + top/bottom border
 
   return (
     <box flexDirection="row" width="100%" height="100%" backgroundColor={theme.bg}>
@@ -318,7 +372,7 @@ function App() {
             </box>
           </Show>
           <box
-            height={3}
+            height={composerHeight()}
             borderStyle="single"
             borderColor={streaming() ? theme.border : theme.borderFocus}
             paddingLeft={1}
@@ -328,7 +382,9 @@ function App() {
             <textarea
               ref={(el: TextareaRenderable) => (composer = el)}
               onSubmit={submit}
+              onContentChange={(v) => setInput(String(v))}
               keyBindings={TEXTAREA_KEYS}
+              wrapMode="word"
               placeholder="Ask anything…  (Enter to send · Shift+Enter newline)"
               placeholderColor={theme.dim}
               textColor={theme.text}
@@ -338,6 +394,7 @@ function App() {
               flexGrow={1}
             />
           </box>
+          <box height={1} backgroundColor={theme.panelAlt} />
           <box
             height={1}
             flexDirection="row"
